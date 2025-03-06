@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate tracing;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use error::Result;
 use listner::Listner;
 use std::net::SocketAddr;
@@ -28,17 +28,23 @@ fn init_log() {
 }
 
 #[derive(Debug, Clone, Subcommand)]
-enum Mode {
-    Server,
+enum Commands {
+    Server { mode: Mode },
     Client { target: SocketAddr },
     ListIp,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum Mode {
+    Ipv4,
+    Ipv6,
 }
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[command(subcommand)]
-    mode: Mode,
+    command: Commands,
 }
 
 fn main() -> Result<()> {
@@ -48,12 +54,14 @@ fn main() -> Result<()> {
 
     debug!("args passed: {:#?}", args);
 
-    match args.mode {
-        Mode::Server => {}
-        Mode::Client { target } => {
+    match args.command {
+        Commands::Server { mode } => {
+            println!("mode: {:#?}", mode);
+        }
+        Commands::Client { target } => {
             let _ = Listner::init(target, 3000)?;
         }
-        Mode::ListIp => {
+        Commands::ListIp => {
             let ips: (Vec<String>, Vec<String>) = Stun::resolve_public_address()?;
             println!("address: {:#?}", ips);
         }
