@@ -6,9 +6,9 @@ use std::{
 
 use crate::{constant::PACKET_SIZE, error::Result};
 
-pub struct Listner {}
+pub struct Server {}
 
-impl Listner {
+impl Server {
     pub fn init(target_addr: SocketAddr, local_port: usize) -> Result<()> {
         let local_addr = format!("0.0.0.0:{}", local_port).parse::<SocketAddr>()?;
         let socket = UdpSocket::bind(local_addr)?;

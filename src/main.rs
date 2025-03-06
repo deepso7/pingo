@@ -2,15 +2,16 @@
 extern crate tracing;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use client::Client;
 use error::Result;
-use listner::Listner;
+use server::Server;
 use std::net::SocketAddr;
 use stun::Stun;
 
 mod client;
 mod constant;
 mod error;
-mod listner;
+mod server;
 mod stun;
 
 fn init_log() {
@@ -29,8 +30,14 @@ fn init_log() {
 
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
-    Server { mode: Mode },
-    Client { target: SocketAddr },
+    Server {
+        taget: SocketAddr,
+        local_port: usize,
+    },
+    Client {
+        target: SocketAddr,
+        local_port: usize,
+    },
     ListIp,
 }
 
@@ -55,11 +62,11 @@ fn main() -> Result<()> {
     debug!("args passed: {:#?}", args);
 
     match args.command {
-        Commands::Server { mode } => {
-            println!("mode: {:#?}", mode);
+        Commands::Server { taget, local_port } => {
+            let _ = Server::init(taget, local_port)?;
         }
-        Commands::Client { target } => {
-            let _ = Listner::init(target, 3000)?;
+        Commands::Client { target, local_port } => {
+            let _ = Client::init(target, local_port)?;
         }
         Commands::ListIp => {
             let ips: (Vec<String>, Vec<String>) = Stun::resolve_public_address()?;
