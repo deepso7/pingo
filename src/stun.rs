@@ -17,6 +17,7 @@ impl Stun {
     pub fn resolve_public_address() -> Result<(Vec<String>, Vec<String>)> {
         let server_addrs = STUN_SERVER.to_socket_addrs()?;
 
+        // ipv4, ipv6
         let mut public_addresses = (Vec::new(), Vec::new());
 
         for addr in server_addrs {
