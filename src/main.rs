@@ -1,7 +1,7 @@
 #[macro_use]
 extern crate tracing;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use client::Client;
 use error::Result;
 use server::Server;
@@ -41,12 +41,6 @@ enum Commands {
     ListIp,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
-enum Mode {
-    Ipv4,
-    Ipv6,
-}
-
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -70,7 +64,7 @@ fn main() -> Result<()> {
         }
         Commands::ListIp => {
             let ips: (Vec<String>, Vec<String>) = Stun::resolve_public_address()?;
-            println!("address: {:#?}", ips);
+            info!("address: {:#?}", ips);
         }
     }
 

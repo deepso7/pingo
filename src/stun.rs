@@ -27,6 +27,8 @@ impl Stun {
 
                 socket.set_read_timeout(Some(Duration::from_secs(5)))?;
 
+                debug!("local port: {}", socket.local_addr()?.port());
+
                 match socket.send_to(&BINDING_REQUEST, addr) {
                     Ok(sent) => {
                         debug!("Sent {} bytes to server", sent);
