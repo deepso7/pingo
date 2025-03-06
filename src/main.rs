@@ -5,7 +5,10 @@ use clap::{Parser, Subcommand};
 use client::Client;
 use error::Result;
 use server::Server;
-use std::net::SocketAddr;
+use std::{
+    io::{self, Write},
+    net::SocketAddr,
+};
 use stun::Stun;
 
 mod client;
@@ -30,8 +33,8 @@ fn init_log() {
 
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
-    Server { taget: SocketAddr },
-    Client { target: SocketAddr },
+    Server,
+    Client,
     ListIp,
 }
 
@@ -58,11 +61,18 @@ fn main() -> Result<()> {
 
     info!("public addresses: {:#?}", addrs);
 
+    print!("enter target address: ");
+    io::stdout().flush().unwrap(); // Ensure the prompt is printed immediately
+
+    let mut target_input = String::new();
+    io::stdin().read_line(&mut target_input).unwrap();
+    let target = target_input.trim().parse::<SocketAddr>()?;
+
     match args.command {
-        Commands::Server { taget } => {
-            let _ = Server::init(taget, ipv4_addr.local_port.clone())?;
+        Commands::Server => {
+            let _ = Server::init(target, ipv4_addr.local_port.clone())?;
         }
-        Commands::Client { target } => {
+        Commands::Client => {
             let _ = Client::init(target, ipv4_addr.local_port.clone())?;
         }
         Commands::ListIp => {}
