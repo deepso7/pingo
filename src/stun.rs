@@ -13,12 +13,18 @@ const BINDING_REQUEST: [u8; 20] = [
 
 pub struct Stun {}
 
+#[derive(Debug)]
+pub struct AddressPair {
+    pub public_address: SocketAddr,
+    pub local_port: u16,
+}
+
 impl Stun {
-    pub fn resolve_public_address() -> Result<(Vec<String>, Vec<String>)> {
+    pub fn resolve_public_address() -> Result<Vec<AddressPair>> {
         let server_addrs = STUN_SERVER.to_socket_addrs()?;
 
         // ipv4, ipv6
-        let mut public_addresses = (Vec::new(), Vec::new());
+        let mut ips = vec![];
 
         for addr in server_addrs {
             if addr.is_ipv4() {
@@ -26,8 +32,6 @@ impl Stun {
                 let socket = UdpSocket::bind(local_addr)?;
 
                 socket.set_read_timeout(Some(Duration::from_secs(5)))?;
-
-                debug!("local port: {}", socket.local_addr()?.port());
 
                 match socket.send_to(&BINDING_REQUEST, addr) {
                     Ok(sent) => {
@@ -71,7 +75,11 @@ impl Stun {
                                                 ip[0], ip[1], ip[2], ip[3], port
                                             );
 
-                                            public_addresses.0.push(public_addr);
+                                            ips.push(AddressPair {
+                                                public_address: public_addr
+                                                    .parse::<SocketAddr>()?,
+                                                local_port: socket.local_addr()?.port(),
+                                            });
                                         }
                                     }
                                     i += 4 + attr_length as usize;
@@ -134,9 +142,13 @@ impl Stun {
 
                                                 let ipv6 = Ipv6Addr::from(ipv6_bytes);
 
-                                                let public_addr = format!("{}:{}", ipv6, port);
+                                                let public_addr = format!("[{}]:{}", ipv6, port);
 
-                                                public_addresses.1.push(public_addr);
+                                                ips.push(AddressPair {
+                                                    public_address: public_addr
+                                                        .parse::<SocketAddr>()?,
+                                                    local_port: socket.local_addr()?.port(),
+                                                });
                                             }
                                         }
                                     }
@@ -155,6 +167,6 @@ impl Stun {
             }
         }
 
-        Ok(public_addresses)
+        Ok(ips)
     }
 }

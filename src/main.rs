@@ -30,14 +30,8 @@ fn init_log() {
 
 #[derive(Debug, Clone, Subcommand)]
 enum Commands {
-    Server {
-        taget: SocketAddr,
-        local_port: usize,
-    },
-    Client {
-        target: SocketAddr,
-        local_port: usize,
-    },
+    Server { taget: SocketAddr },
+    Client { target: SocketAddr },
     ListIp,
 }
 
@@ -55,17 +49,23 @@ fn main() -> Result<()> {
 
     debug!("args passed: {:#?}", args);
 
+    let addrs = Stun::resolve_public_address()?;
+
+    let ipv4_addr = addrs
+        .iter()
+        .find(|addr| addr.public_address.is_ipv4())
+        .unwrap();
+
+    info!("public addresses: {:#?}", addrs);
+
     match args.command {
-        Commands::Server { taget, local_port } => {
-            let _ = Server::init(taget, local_port)?;
+        Commands::Server { taget } => {
+            let _ = Server::init(taget, ipv4_addr.local_port.clone())?;
         }
-        Commands::Client { target, local_port } => {
-            let _ = Client::init(target, local_port)?;
+        Commands::Client { target } => {
+            let _ = Client::init(target, ipv4_addr.local_port.clone())?;
         }
-        Commands::ListIp => {
-            let ips: (Vec<String>, Vec<String>) = Stun::resolve_public_address()?;
-            info!("address: {:#?}", ips);
-        }
+        Commands::ListIp => {}
     }
 
     Ok(())

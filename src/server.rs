@@ -9,7 +9,7 @@ use crate::{constant::PACKET_SIZE, error::Result};
 pub struct Server {}
 
 impl Server {
-    pub fn init(target_addr: SocketAddr, local_port: usize) -> Result<()> {
+    pub fn init(target_addr: SocketAddr, local_port: u16) -> Result<()> {
         let local_addr = format!("0.0.0.0:{}", local_port).parse::<SocketAddr>()?;
         let socket = UdpSocket::bind(local_addr)?;
 
