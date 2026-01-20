@@ -1,170 +1,259 @@
 use std::env;
 use std::net::{SocketAddr, UdpSocket};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use pingo::{get_public_addr_with_socket, measure_latency, punch_hole};
+use pingo::{get_public_addr_with_socket, measure_latency};
+
+const PUNCH_MAGIC: &[u8] = b"PINGO_PUNCH";
+const PING: u8 = 0x01;
+const PONG: u8 = 0x02;
 
 fn print_usage() {
-    eprintln!("Usage:");
-    eprintln!("  Server mode (auto-detect public IP via STUN):");
-    eprintln!("    cargo run --example peer_ping");
+    eprintln!("Usage: cargo run --example peer_ping -- <peer_ip:port>");
     eprintln!();
-    eprintln!("  Server mode (specify port, for EC2/VPS with public IP):");
-    eprintln!("    cargo run --example peer_ping -- --listen <port>");
-    eprintln!("    Then tell peer to connect to <your-public-ip>:<port>");
+    eprintln!("Bidirectional P2P latency measurement.");
     eprintln!();
-    eprintln!("  Client mode:");
-    eprintln!("    cargo run --example peer_ping -- <peer_ip:port>");
+    eprintln!("Setup:");
+    eprintln!("  1. Run on both machines to get public addresses:");
+    eprintln!("     cargo run --example peer_ping");
+    eprintln!();
+    eprintln!("  2. Exchange addresses, then both run simultaneously:");
+    eprintln!("     cargo run --example peer_ping -- <peer's_address>");
+    eprintln!();
+    eprintln!("For EC2/VPS (no NAT), use --listen mode:");
+    eprintln!("     cargo run --example peer_ping -- --listen 9999");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        // No args - server mode with STUN
-        run_as_server(None);
-    } else if args[1] == "--listen" {
-        // --listen <port> - server mode with specific port (for EC2)
-        let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
-            print_usage();
-            std::process::exit(1);
-        });
-        run_as_server(Some(port));
-    } else if args[1] == "--help" || args[1] == "-h" {
-        print_usage();
-    } else {
-        // Peer address provided - client mode
-        let peer_addr: SocketAddr = args[1].parse().unwrap_or_else(|_| {
-            eprintln!("Invalid peer address: {}", args[1]);
-            print_usage();
-            std::process::exit(1);
-        });
-        run_as_client(peer_addr);
+        // No args - just show our public address
+        show_public_addr();
+        return;
+    }
+
+    match args[1].as_str() {
+        "--help" | "-h" => print_usage(),
+        "--listen" => {
+            let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+                eprintln!("Error: --listen requires a port number");
+                std::process::exit(1);
+            });
+            run_server(port);
+        }
+        addr => {
+            let peer_addr: SocketAddr = addr.parse().unwrap_or_else(|_| {
+                eprintln!("Invalid address: {}", addr);
+                print_usage();
+                std::process::exit(1);
+            });
+            run_bidirectional(peer_addr);
+        }
     }
 }
 
-fn run_as_server(fixed_port: Option<u16>) {
-    println!("Starting in server mode...");
+fn show_public_addr() {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind");
+    let public_addr = get_public_addr_with_socket(Some(&socket)).expect("STUN failed");
 
-    // Bind socket
-    let bind_addr = match fixed_port {
-        Some(port) => format!("0.0.0.0:{}", port),
-        None => "0.0.0.0:0".to_string(),
-    };
-    let socket = UdpSocket::bind(&bind_addr).expect("Failed to bind socket");
-    let local_addr = socket.local_addr().unwrap();
-    println!("Local address: {}", local_addr);
-
-    // Get our public address (or show instructions for EC2)
-    if fixed_port.is_some() {
-        println!();
-        println!("Listening on port {} (EC2/VPS mode)", local_addr.port());
-        println!("Make sure this UDP port is open in your security group!");
-        println!();
-        println!("Tell your peer to run:");
-        println!(
-            "  cargo run --example peer_ping -- <your-public-ip>:{}",
-            local_addr.port()
-        );
-    } else {
-        let public_addr =
-            get_public_addr_with_socket(Some(&socket)).expect("Failed to get public address");
-        println!("Public address (from STUN): {}", public_addr);
-        println!();
-        println!("Share this with your peer, then run:");
-        println!("  cargo run --example peer_ping -- {}", public_addr);
-    }
-
+    println!("Your public address: {}", public_addr);
     println!();
-    println!("Waiting for peer to connect...");
-    println!("(Will print ALL incoming packets for debugging)");
+    println!("Share this with your peer, then both run:");
+    println!("  cargo run --example peer_ping -- <peer's_address>");
+    println!();
+    println!("Both must start within a few seconds of each other!");
+}
+
+/// Server mode for EC2/VPS - responds to pings and also pings back
+fn run_server(port: u16) {
+    println!("Listening on port {}...", port);
+    println!(
+        "Peer should run: cargo run --example peer_ping -- <your-ip>:{}",
+        port
+    );
     println!();
 
-    // Set timeout for receiving
-    socket.set_read_timeout(Some(Duration::from_secs(1))).ok();
+    let socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).expect("Failed to bind");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .ok();
 
-    // Wait for hole punch and respond to pings
-    let mut buf = [0u8; 512];
-    let punch_magic = b"PINGO_PUNCH";
+    let mut buf = [0u8; 64];
+    let mut peer: Option<SocketAddr> = None;
+    let mut last_ping_sent = Instant::now();
+    let mut ping_seq: u32 = 0;
+    let mut rtts: Vec<Duration> = Vec::new();
+
+    println!("Waiting for peer...");
+
     loop {
+        // Receive
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                println!(
-                    "[RECV] {} bytes from {}: {:?}",
-                    len,
-                    from,
-                    &buf[..len.min(32)]
-                );
-
-                // Respond to punch packets
-                if len == punch_magic.len() && &buf[..len] == punch_magic {
-                    socket.send_to(punch_magic, from).ok();
-                    println!("[SEND] Punch response to {}", from);
+                if peer.is_none() {
+                    peer = Some(from);
+                    println!("Peer connected: {}", from);
+                    println!();
                 }
-                // Respond to ping packets
-                else if len >= 13 && buf[0] == 0x01 {
+
+                // Respond to punch
+                if len == PUNCH_MAGIC.len() && &buf[..len] == PUNCH_MAGIC {
+                    socket.send_to(PUNCH_MAGIC, from).ok();
+                }
+                // Respond to ping with pong
+                else if len >= 13 && buf[0] == PING {
                     let mut pong = buf[..len].to_vec();
-                    pong[0] = 0x02;
+                    pong[0] = PONG;
                     socket.send_to(&pong, from).ok();
-                    println!("[SEND] Pong to {}", from);
+                }
+                // Process pong (response to our ping)
+                else if len >= 13 && buf[0] == PONG {
+                    let recv_seq = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
+                    if recv_seq == ping_seq.wrapping_sub(1) {
+                        let rtt = last_ping_sent.elapsed();
+                        rtts.push(rtt);
+                        println!("  Ping {:2}: {:>10.2?}", rtts.len(), rtt);
+
+                        if rtts.len() >= 10 {
+                            print_stats(&rtts);
+                            rtts.clear();
+                        }
+                    }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => {
-                eprintln!("Error: {}", e);
+            Err(_) => {}
+        }
+
+        // Send our own pings to peer
+        if let Some(peer_addr) = peer {
+            if last_ping_sent.elapsed() > Duration::from_millis(200) {
+                let mut ping = vec![PING];
+                ping.extend_from_slice(&ping_seq.to_be_bytes());
+                ping.extend_from_slice(&[0u8; 8]); // timestamp placeholder
+                socket.send_to(&ping, peer_addr).ok();
+                ping_seq = ping_seq.wrapping_add(1);
+                last_ping_sent = Instant::now();
             }
         }
     }
 }
 
-fn run_as_client(peer_addr: SocketAddr) {
-    println!("Starting in client mode...");
+/// Bidirectional mode - both sides punch and ping simultaneously
+fn run_bidirectional(peer_addr: SocketAddr) {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind");
+
+    // Get public address using same socket (preserves NAT mapping)
+    let public_addr = get_public_addr_with_socket(Some(&socket)).expect("STUN failed");
+    println!("Your public address: {}", public_addr);
     println!("Peer address: {}", peer_addr);
-
-    // Bind socket
-    let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind socket");
-    let local_addr = socket.local_addr().unwrap();
-    println!("Local address: {}", local_addr);
-
-    // Get our public address (uses same socket, so NAT mapping is preserved)
-    let public_addr =
-        get_public_addr_with_socket(Some(&socket)).expect("Failed to get public address");
-
-    println!("Public address (from STUN): {}", public_addr);
     println!();
 
-    // Punch hole to peer
-    println!("Punching hole to peer...");
-    println!("(Sending UDP packets to {} for 10 seconds)", peer_addr);
-    match punch_hole(&socket, peer_addr) {
-        Ok(()) => println!("Hole punched successfully!"),
-        Err(e) => {
-            eprintln!("Hole punch failed: {}", e);
-            eprintln!("Make sure the peer is running and both started around the same time.");
-            return;
-        }
-    }
+    // Clone socket for the responder thread
+    let socket_clone = socket.try_clone().expect("Failed to clone socket");
 
-    println!();
-    println!("Measuring latency (10 pings)...");
+    // Channel to signal when hole is punched
+    let (tx, rx) = mpsc::channel();
 
-    // Measure latency
-    match measure_latency(&socket, peer_addr, 10) {
-        Ok(stats) => {
-            println!();
-            println!("Results:");
-            println!("  Min: {:?}", stats.min);
-            println!("  Max: {:?}", stats.max);
-            println!("  Avg: {:?}", stats.avg);
-            println!();
-            println!("Individual samples:");
-            for (i, sample) in stats.samples.iter().enumerate() {
-                println!("  Ping {}: {:?}", i + 1, sample);
+    // Responder thread - responds to pings from peer
+    let peer_addr_clone = peer_addr;
+    thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        socket_clone
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .ok();
+
+        loop {
+            match socket_clone.recv_from(&mut buf) {
+                Ok((len, from)) => {
+                    if from.ip() != peer_addr_clone.ip() {
+                        continue;
+                    }
+
+                    // Punch packet - signal main thread
+                    if len == PUNCH_MAGIC.len() && &buf[..len] == PUNCH_MAGIC {
+                        tx.send(()).ok();
+                        socket_clone.send_to(PUNCH_MAGIC, from).ok();
+                    }
+                    // Ping - respond with pong
+                    else if len >= 13 && buf[0] == PING {
+                        let mut pong = buf[..len].to_vec();
+                        pong[0] = PONG;
+                        socket_clone.send_to(&pong, from).ok();
+                    }
+                }
+                Err(_) => {}
             }
         }
+    });
+
+    // Punch hole
+    println!("Punching hole...");
+    let start = Instant::now();
+    let timeout = Duration::from_secs(10);
+    let mut connected = false;
+
+    while start.elapsed() < timeout {
+        socket.send_to(PUNCH_MAGIC, peer_addr).ok();
+
+        // Check if responder thread received something
+        if rx.try_recv().is_ok() {
+            connected = true;
+            // Send a few more to ensure peer receives
+            for _ in 0..5 {
+                socket.send_to(PUNCH_MAGIC, peer_addr).ok();
+                thread::sleep(Duration::from_millis(20));
+            }
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    if !connected {
+        eprintln!("Failed to connect. Make sure both peers start at the same time.");
+        return;
+    }
+
+    println!("Connected!");
+    println!();
+
+    // Measure latency
+    println!("Measuring latency...");
+    println!();
+
+    match measure_latency(&socket, peer_addr, 10) {
+        Ok(stats) => {
+            for (i, sample) in stats.samples.iter().enumerate() {
+                println!("  Ping {:2}: {:>10.2?}", i + 1, sample);
+            }
+            println!();
+            print_stats(&stats.samples);
+        }
         Err(e) => {
-            eprintln!("Latency measurement failed: {}", e);
+            eprintln!("Failed: {}", e);
         }
     }
+
+    // Keep responding for a bit so peer can measure us too
+    println!();
+    println!("Staying online for peer to measure back (30s)...");
+    thread::sleep(Duration::from_secs(30));
+}
+
+fn print_stats(samples: &[Duration]) {
+    if samples.is_empty() {
+        return;
+    }
+    let min = samples.iter().min().unwrap();
+    let max = samples.iter().max().unwrap();
+    let sum: Duration = samples.iter().sum();
+    let avg = sum / samples.len() as u32;
+
+    println!("  ─────────────────────");
+    println!("  Min: {:>10.2?}", min);
+    println!("  Avg: {:>10.2?}", avg);
+    println!("  Max: {:>10.2?}", max);
 }
