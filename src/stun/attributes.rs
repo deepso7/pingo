@@ -1,18 +1,25 @@
+//! STUN attribute parsing.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use super::message::MAGIC_COOKIE;
 use crate::Result;
 
-use super::message::MAGIC_COOKIE;
+/// XOR-MAPPED-ADDRESS attribute type.
+const XOR_MAPPED_ADDRESS: u16 = 0x0020;
 
-/// Attribute types
-pub const XOR_MAPPED_ADDRESS: u16 = 0x0020;
-pub const MAPPED_ADDRESS: u16 = 0x0001;
+/// MAPPED-ADDRESS attribute type (legacy fallback).
+const MAPPED_ADDRESS: u16 = 0x0001;
 
-/// Address family
+/// IPv4 address family.
 const FAMILY_IPV4: u8 = 0x01;
+
+/// IPv6 address family.
 const FAMILY_IPV6: u8 = 0x02;
 
-/// Parse XOR-MAPPED-ADDRESS attribute from raw attributes bytes
+/// Parses XOR-MAPPED-ADDRESS (or MAPPED-ADDRESS) from STUN attributes.
+///
+/// Returns the public socket address of the client as seen by the STUN server.
 pub fn parse_xor_mapped_address(
     attributes: &[u8],
     transaction_id: &[u8; 12],
@@ -33,19 +40,18 @@ pub fn parse_xor_mapped_address(
             );
         }
 
-        // Also handle MAPPED-ADDRESS as fallback (some servers use it)
         if attr_type == MAPPED_ADDRESS {
             return decode_mapped_address(&attributes[offset..offset + attr_len]);
         }
 
-        // Move to next attribute (attributes are padded to 4-byte boundaries)
+        // Attributes are padded to 4-byte boundaries
         offset += (attr_len + 3) & !3;
     }
 
-    Err("XOR-MAPPED-ADDRESS not found".into())
+    Err("XOR-MAPPED-ADDRESS attribute not found".into())
 }
 
-/// Decode XOR-MAPPED-ADDRESS
+/// Decodes XOR-MAPPED-ADDRESS attribute value.
 fn decode_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<SocketAddr> {
     if data.len() < 8 {
         return Err("XOR-MAPPED-ADDRESS too short".into());
@@ -58,14 +64,13 @@ fn decode_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<S
     let ip = match family {
         FAMILY_IPV4 => {
             let x_addr = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-            let addr = x_addr ^ MAGIC_COOKIE;
-            IpAddr::V4(Ipv4Addr::from(addr))
+            IpAddr::V4(Ipv4Addr::from(x_addr ^ MAGIC_COOKIE))
         }
         FAMILY_IPV6 => {
             if data.len() < 20 {
                 return Err("XOR-MAPPED-ADDRESS IPv6 too short".into());
             }
-            // XOR with magic cookie + transaction ID
+            // XOR with magic cookie (4 bytes) + transaction ID (12 bytes)
             let mut xor_bytes = [0u8; 16];
             xor_bytes[0..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
             xor_bytes[4..16].copy_from_slice(transaction_id);
@@ -82,7 +87,7 @@ fn decode_xor_mapped_address(data: &[u8], transaction_id: &[u8; 12]) -> Result<S
     Ok(SocketAddr::new(ip, port))
 }
 
-/// Decode MAPPED-ADDRESS (non-XOR, fallback)
+/// Decodes MAPPED-ADDRESS attribute value (legacy, non-XOR).
 fn decode_mapped_address(data: &[u8]) -> Result<SocketAddr> {
     if data.len() < 8 {
         return Err("MAPPED-ADDRESS too short".into());

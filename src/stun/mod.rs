@@ -1,3 +1,7 @@
+//! STUN protocol implementation (RFC 5389 subset).
+//!
+//! This module provides a minimal STUN client for discovering public IP addresses.
+
 mod attributes;
 mod client;
 mod message;
