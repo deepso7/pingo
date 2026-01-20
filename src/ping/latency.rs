@@ -5,7 +5,7 @@ use crate::Result;
 
 /// Ping packet type
 const PING: u8 = 0x01;
-/// Pong packet type  
+/// Pong packet type
 const PONG: u8 = 0x02;
 
 /// Timeout for individual ping
@@ -72,42 +72,26 @@ pub fn measure_latency(
         ping_packet.extend_from_slice(&timestamp.to_be_bytes());
 
         socket.send_to(&ping_packet, peer_addr)?;
-        eprintln!("[ping] Sent ping seq={} to {}", seq, peer_addr);
 
         // Wait for matching pong
         loop {
             match socket.recv_from(&mut buf) {
                 Ok((len, from)) => {
-                    eprintln!(
-                        "[ping] Received {} bytes from {}: type=0x{:02x}, data={:?}",
-                        len,
-                        from,
-                        buf[0],
-                        &buf[..len.min(16)]
-                    );
-
                     // Check it's a valid pong with matching sequence
                     if from.ip() == peer_addr.ip() && len >= 13 && buf[0] == PONG {
                         let recv_seq = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
                         if recv_seq == seq {
                             let rtt = send_time.elapsed();
-                            eprintln!("[ping] Valid pong for seq={}, RTT={:?}", seq, rtt);
                             samples.push(rtt);
                             break;
-                        } else {
-                            eprintln!(
-                                "[ping] Sequence mismatch: expected {}, got {}",
-                                seq, recv_seq
-                            );
                         }
                     }
+                    // Ignore non-matching packets (stale punch packets, etc.)
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    eprintln!("[ping] Timeout waiting for pong seq={}", seq);
                     break;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    eprintln!("[ping] Timeout waiting for pong seq={}", seq);
                     break;
                 }
                 Err(e) => return Err(e.into()),
